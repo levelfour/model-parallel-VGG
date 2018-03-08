@@ -63,8 +63,11 @@ def main():
     optimizer.setup(model)
     optimizer.add_hook(chainer.optimizer.WeightDecay(5e-4))
 
-    # Load the MNIST dataset
+    # Load the CIFAR10 dataset
     train, test = chainer.datasets.get_cifar10()
+    if comm.rank != 0:
+        train = chainermn.datasets.create_empty_dataset(train)
+        test = chainermn.datasets.create_empty_dataset(test)
 
     train_iter = chainer.iterators.SerialIterator(train, args.batchsize)
     test_iter = chainer.iterators.SerialIterator(test, args.batchsize,
@@ -75,10 +78,10 @@ def main():
         train_iter, optimizer, device=device)
     trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.out)
 
+    # Evaluate the model with the test dataset for each epoch
+    trainer.extend(extensions.Evaluator(test_iter, model, device=device))
+
     if comm.rank == 0:
-        # Evaluate the model with the test dataset for each epoch
-        trainer.extend(extensions.Evaluator(test_iter, model, device=device))
-    
         # Dump a computational graph from 'loss' variable at the first iteration
         # The "main" refers to the target link of the "main" optimizer.
         trainer.extend(extensions.dump_graph('main/loss'))

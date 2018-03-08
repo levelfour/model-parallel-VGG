@@ -14,12 +14,23 @@ def debug(*s):
 
 class ParallelConvolution2D(chainer.links.Convolution2D):
     def __init__(self, comm, device, rank_root, in_channels, *args, **kwargs):
-        assert in_channels == 3, "actual in_channels is {}".format(in_channels)  # TODO enable to split channels evenly
-        # Set in_channels = 1.
-        super(ParallelConvolution2D, self).__init__(1, *args, **kwargs)
         self.comm = comm
         self.device = device
         self.rank_root = rank_root
+
+        self.channel_sizes = [
+            in_channels // self.comm.size + (1 if i < in_channels % self.comm.size else 0)
+            for i in range(self.comm.size)]
+        self.channel_ranges = [(sum(self.channel_sizes[:i]), sum(self.channel_sizes[:i + 1]))
+            for i in range(self.comm.size)]
+
+        super(ParallelConvolution2D, self).__init__(
+            self.channel_sizes[self.comm.rank], *args, **kwargs)
+
+    def _channel_size(self, n_channel):
+        n_proc = self.comm.size
+        i_proc = self.comm.rank
+        return n_channel // n_proc + (1 if i_proc < n_channel % n_proc else 0)
 
     def __call__(self, *inputs):
         if self.comm.rank == self.rank_root:
@@ -27,15 +38,18 @@ class ParallelConvolution2D(chainer.links.Convolution2D):
             phi = None
 
             # scatter
+            chan = 0
             for rank in range(self.comm.size):
                 if rank == self.comm.rank:
-                    _x = x[:, rank:rank+1]
+                    _x = x[:, chan:chan + self.channel_sizes[rank]]
                 else:
-                    _phi = chainermn.functions.send(x[:, rank:rank+1], self.comm, rank)
+                    _phi = chainermn.functions.send(x[:, chan:chan + self.channel_sizes[rank]], self.comm, rank)
                     if phi is not None:
                         phi = chainermn.functions.pseudo_connect(phi, _phi)
                     else:
                         phi = _phi
+
+                chan += self.channel_sizes[rank]
 
             # convolution
             y = super(ParallelConvolution2D, self).__call__(_x)
@@ -132,25 +146,24 @@ class VGG(chainer.Chain):
             Block = SlaveBlock
 
         with self.init_scope():
-            self.block1_1 = Block(comm, device, 3, 3) # Block(64, 3)
-            self.block1_2 = Block(comm, device, 3, 3) # Block(64, 3)
-            self.block2_1 = Block(comm, device, 3, 3) # Block(128, 3)
-            self.block2_2 = Block(comm, device, 3, 3) # Block(128, 3)
-            self.block3_1 = Block(comm, device, 3, 3) # Block(256, 3)
-            self.block3_2 = Block(comm, device, 3, 3) # Block(256, 3)
-            self.block3_3 = Block(comm, device, 3, 3) # Block(256, 3)
-            self.block4_1 = Block(comm, device, 3, 3) # Block(512, 3)
-            self.block4_2 = Block(comm, device, 3, 3) # Block(512, 3)
-            self.block4_3 = Block(comm, device, 3, 3) # Block(512, 3)
-            self.block5_1 = Block(comm, device, 3, 3) # Block(512, 3)
-            self.block5_2 = Block(comm, device, 3, 3) # Block(512, 3)
-            self.block5_3 = Block(comm, device, 3, 3) # Block(512, 3)
+            self.block1_1 = Block(comm, device, 64, 3)
+            self.block1_2 = Block(comm, device, 64, 3)
+            self.block2_1 = Block(comm, device, 128, 3)
+            self.block2_2 = Block(comm, device, 128, 3)
+            self.block3_1 = Block(comm, device, 256, 3)
+            self.block3_2 = Block(comm, device, 256, 3)
+            self.block3_3 = Block(comm, device, 256, 3)
+            self.block4_1 = Block(comm, device, 512, 3)
+            self.block4_2 = Block(comm, device, 512, 3)
+            self.block4_3 = Block(comm, device, 512, 3)
+            self.block5_1 = Block(comm, device, 512, 3)
+            self.block5_2 = Block(comm, device, 512, 3)
+            self.block5_3 = Block(comm, device, 512, 3)
             self.fc1 = L.Linear(None, 512, nobias=True)
             self.bn_fc1 = L.BatchNormalization(512)
             self.fc2 = L.Linear(None, class_labels, nobias=True)
 
     def __call__(self, *inputs):
-        debug('call')
         if self.comm.rank == 0:  # master
             x, = inputs
 
