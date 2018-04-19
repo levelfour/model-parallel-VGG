@@ -4,6 +4,7 @@ import chainer
 import chainer.functions as F
 import chainer.links as L
 import chainermn.functions
+import numpy as np
 
 
 def debug(*s):
@@ -13,67 +14,42 @@ def debug(*s):
 
 
 class ParallelConvolution2D(chainer.links.Convolution2D):
-    def __init__(self, comm, device, rank_root, in_channels, *args, **kwargs):
+    def __init__(self, comm, device, in_channels, out_channels, *args, **kwargs):
         self.comm = comm
         self.device = device
-        self.rank_root = rank_root
-
-        self.channel_sizes = [
-            in_channels // self.comm.size + (1 if i < in_channels % self.comm.size else 0)
-            for i in range(self.comm.size)]
-        self.channel_ranges = [(sum(self.channel_sizes[:i]), sum(self.channel_sizes[:i + 1]))
-            for i in range(self.comm.size)]
-
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         super(ParallelConvolution2D, self).__init__(
-            self.channel_sizes[self.comm.rank], *args, **kwargs)
+            self._in_channel_size, self._out_channel_size, *args, **kwargs)
 
     def _channel_size(self, n_channel):
+        # Return the size of the corresponding channels.
         n_proc = self.comm.size
         i_proc = self.comm.rank
         return n_channel // n_proc + (1 if i_proc < n_channel % n_proc else 0)
 
-    def __call__(self, *inputs):
-        if self.comm.rank == self.rank_root:
-            x, = inputs
-            phi = None
+    @property
+    def _in_channel_size(self):
+        return self._channel_size(self.in_channels)
 
-            # scatter
-            chan = 0
-            for rank in range(self.comm.size):
-                if rank == self.comm.rank:
-                    _x = x[:, chan:chan + self.channel_sizes[rank]]
-                else:
-                    _phi = chainermn.functions.send(x[:, chan:chan + self.channel_sizes[rank]], self.comm, rank)
-                    if phi is not None:
-                        phi = chainermn.functions.pseudo_connect(phi, _phi)
-                    else:
-                        phi = _phi
+    @property
+    def _out_channel_size(self):
+        return self._channel_size(self.out_channels)
 
-                chan += self.channel_sizes[rank]
+    @property
+    def _channel_indices(self):
+        # Return the indices of the corresponding channel.
+        indices = np.arange(self.in_channels)
+        return indices[indices % self.comm.size == 0] + self.comm.rank
 
-            # convolution
-            y = super(ParallelConvolution2D, self).__call__(_x)
-
-            # gather -> reduce
-            for rank in range(self.comm.size):
-                if rank != self.comm.rank:
-                    # NOTE: every recv needs phi, to maintain backward priority
-                    _y = chainermn.functions.recv(self.comm, rank, device=self.device, delegate_variable=phi)
-                    y += _y
-
-            return y
-
-        else:
-            if len(inputs) > 0:
-                phi, = inputs
-            else:
-                phi = None
-            x = chainermn.functions.recv(self.comm, self.rank_root, device=self.device, delegate_variable=phi)
-            y = super(ParallelConvolution2D, self).__call__(x)
-            return chainermn.functions.send(y, self.comm, self.rank_root)
+    def __call__(self, x):
+        x = x[:, self._channel_indices, :, :]
+        y = super(ParallelConvolution2D, self).__call__(x)
+        ys = chainermn.functions.all_gather(self.comm, y, device=self.device)
+        return F.concat(ys, axis=1)
 
 
-class MasterBlock(chainer.Chain):
+class Block(chainer.Chain):
 
     """A convolution, batch norm, ReLU block.
 
@@ -91,26 +67,15 @@ class MasterBlock(chainer.Chain):
     """
 
     def __init__(self, comm, device, out_channels, ksize, pad=1):
-        super(MasterBlock, self).__init__()
+        super(Block, self).__init__()
         with self.init_scope():
-            self.conv = ParallelConvolution2D(comm, device, 0, 3, out_channels, ksize, pad=pad, nobias=True)
+            self.conv = ParallelConvolution2D(comm, device, 3, out_channels, ksize, pad=pad, nobias=True)
             self.bn = L.BatchNormalization(out_channels)
 
     def __call__(self, x):
         h = self.conv(x)
         h = self.bn(h)
         return F.relu(h)
-
-
-class SlaveBlock(chainer.Chain):
-    def __init__(self, comm, device, out_channels, ksize, pad=1):
-        super(SlaveBlock, self).__init__()
-        with self.init_scope():
-            self.conv = ParallelConvolution2D(comm, device, 0, 3, out_channels, ksize, pad=pad, nobias=True)
-
-    def __call__(self, *inputs):
-        # Passing delegate variables.
-        return self.conv(*inputs)
 
 
 class VGG(chainer.Chain):
@@ -140,10 +105,6 @@ class VGG(chainer.Chain):
     def __init__(self, comm, device, class_labels=10):
         super(VGG, self).__init__()
         self.comm = comm
-        if comm.rank == 0:  # master
-            Block = MasterBlock
-        else:  # slave
-            Block = SlaveBlock
 
         with self.init_scope():
             self.block1_1 = Block(comm, device, 64, 3)
@@ -163,77 +124,48 @@ class VGG(chainer.Chain):
             self.bn_fc1 = L.BatchNormalization(512)
             self.fc2 = L.Linear(None, class_labels, nobias=True)
 
-    def __call__(self, *inputs):
-        if self.comm.rank == 0:  # master
-            x, = inputs
+    def __call__(self, x):
+        # 64 channel blocks:
+        h = self.block1_1(x)
+        h = F.dropout(h, ratio=0.3)
+        h = self.block1_2(h)
+        h = F.max_pooling_2d(h, ksize=2, stride=2)
+    
+        # 128 channel blocks:
+        h = self.block2_1(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block2_2(h)
+        h = F.max_pooling_2d(h, ksize=2, stride=2)
+    
+        # 256 channel blocks:
+        h = self.block3_1(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block3_2(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block3_3(h)
+        h = F.max_pooling_2d(h, ksize=2, stride=2)
+    
+        # 512 channel blocks:
+        h = self.block4_1(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block4_2(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block4_3(h)
+        h = F.max_pooling_2d(h, ksize=2, stride=2)
+    
+        # 512 channel blocks:
+        h = self.block5_1(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block5_2(h)
+        h = F.dropout(h, ratio=0.4)
+        h = self.block5_3(h)
+        h = F.max_pooling_2d(h, ksize=2, stride=2)
+    
+        h = F.dropout(h, ratio=0.5)
+        h = self.fc1(h)
+        h = self.bn_fc1(h)
+        h = F.relu(h)
+        h = F.dropout(h, ratio=0.5)
+        h = self.fc2(h)
 
-            # 64 channel blocks:
-            h = self.block1_1(x)
-            h = F.dropout(h, ratio=0.3)
-            h = self.block1_2(h)
-            h = F.max_pooling_2d(h, ksize=2, stride=2)
-    
-            # 128 channel blocks:
-            h = self.block2_1(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block2_2(h)
-            h = F.max_pooling_2d(h, ksize=2, stride=2)
-    
-            # 256 channel blocks:
-            h = self.block3_1(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block3_2(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block3_3(h)
-            h = F.max_pooling_2d(h, ksize=2, stride=2)
-    
-            # 512 channel blocks:
-            h = self.block4_1(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block4_2(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block4_3(h)
-            h = F.max_pooling_2d(h, ksize=2, stride=2)
-    
-            # 512 channel blocks:
-            h = self.block5_1(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block5_2(h)
-            h = F.dropout(h, ratio=0.4)
-            h = self.block5_3(h)
-            h = F.max_pooling_2d(h, ksize=2, stride=2)
-    
-            h = F.dropout(h, ratio=0.5)
-            h = self.fc1(h)
-            h = self.bn_fc1(h)
-            h = F.relu(h)
-            h = F.dropout(h, ratio=0.5)
-            h = self.fc2(h)
-
-            return h
-
-        else:  # slave
-            # 64 channel blocks:
-            h = self.block1_1()
-            h = self.block1_2(h)
-    
-            # 128 channel blocks:
-            h = self.block2_1(h)
-            h = self.block2_2(h)
-    
-            # 256 channel blocks:
-            h = self.block3_1(h)
-            h = self.block3_2(h)
-            h = self.block3_3(h)
-    
-            # 512 channel blocks:
-            h = self.block4_1(h)
-            h = self.block4_2(h)
-            h = self.block4_3(h)
-    
-            # 512 channel blocks:
-            h = self.block5_1(h)
-            h = self.block5_2(h)
-            h = self.block5_3(h)
-
-            return h
+        return h

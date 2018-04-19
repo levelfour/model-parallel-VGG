@@ -48,10 +48,7 @@ def main():
     # Set up a neural network to train
     # Classifier reports softmax cross entropy loss and accuracy at every
     # iteration, which will be used by the PrintReport extension below.
-    if comm.rank == 0:
-        model = L.Classifier(VGG.VGG(comm, device, 10))
-    else:
-        model = VGG.VGG(comm, device, 10)
+    model = L.Classifier(VGG.VGG(comm, device, 10))
 
     if args.gpu:
         # Make a specified GPU current
@@ -69,9 +66,12 @@ def main():
         train = chainermn.datasets.create_empty_dataset(train)
         test = chainermn.datasets.create_empty_dataset(test)
 
-    train_iter = chainer.iterators.SerialIterator(train, args.batchsize)
-    test_iter = chainer.iterators.SerialIterator(test, args.batchsize,
-                                                 repeat=False, shuffle=False)
+    train_iter = chainermn.iterators.create_multi_node_iterator(
+        chainer.iterators.SerialIterator(train, args.batchsize), comm)
+    test_iter = chainermn.iterators.create_multi_node_iterator(
+        chainer.iterators.SerialIterator(test, args.batchsize,
+                                         repeat=False, shuffle=False),
+        comm)
 
     # Set up a trainer
     updater = training.StandardUpdater(
