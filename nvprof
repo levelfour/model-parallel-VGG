@@ -1,0 +1,9 @@
+#!/bin/bash
+
+RANK=$MV2_COMM_WORLD_RANK
+
+if [[ -z "$RANK" ]]; then
+  echo "no rank set"
+else
+  nvprof -o profile.$RANK $*
+fi
