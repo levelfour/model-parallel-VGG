@@ -1,0 +1,11 @@
+#!/bin/bash
+
+RANK=$MV2_COMM_WORLD_RANK
+
+if [[ -z "$RANK" ]]; then
+  echo "no rank set"
+elif [[ "$1" != "python" ]]; then
+  echo "only support python"
+else
+  python -m cProfile -o vgg.prof.$RANK ${*:2}
+fi
