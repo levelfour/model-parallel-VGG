@@ -14,9 +14,8 @@ def debug(*s):
 
 
 class ParallelConvolution2D(chainer.links.Convolution2D):
-    def __init__(self, comm, device, in_channels, out_channels, *args, **kwargs):
+    def __init__(self, comm, in_channels, out_channels, *args, **kwargs):
         self.comm = comm
-        self.device = device
         self.in_channels = in_channels
         self.out_channels = out_channels
         super(ParallelConvolution2D, self).__init__(
@@ -45,7 +44,7 @@ class ParallelConvolution2D(chainer.links.Convolution2D):
     def __call__(self, x):
         x = x[:, self._channel_indices, :, :]
         y = super(ParallelConvolution2D, self).__call__(x)
-        ys = chainermn.functions.all_gather(self.comm, y, device=self.device)
+        ys = chainermn.functions.allgather(self.comm, y)
         return F.concat(ys, axis=1)
 
 
@@ -66,10 +65,10 @@ class Block(chainer.Chain):
 
     """
 
-    def __init__(self, comm, device, out_channels, ksize, pad=1):
+    def __init__(self, comm, out_channels, ksize, pad=1):
         super(Block, self).__init__()
         with self.init_scope():
-            self.conv = ParallelConvolution2D(comm, device, 3, out_channels, ksize, pad=pad, nobias=True)
+            self.conv = ParallelConvolution2D(comm, 3, out_channels, ksize, pad=pad, nobias=True)
             self.bn = L.BatchNormalization(out_channels)
 
     def __call__(self, x):
@@ -102,24 +101,24 @@ class VGG(chainer.Chain):
 
     """
 
-    def __init__(self, comm, device, class_labels=10):
+    def __init__(self, comm, class_labels=10):
         super(VGG, self).__init__()
         self.comm = comm
 
         with self.init_scope():
-            self.block1_1 = Block(comm, device, 64, 3)
-            self.block1_2 = Block(comm, device, 64, 3)
-            self.block2_1 = Block(comm, device, 128, 3)
-            self.block2_2 = Block(comm, device, 128, 3)
-            self.block3_1 = Block(comm, device, 256, 3)
-            self.block3_2 = Block(comm, device, 256, 3)
-            self.block3_3 = Block(comm, device, 256, 3)
-            self.block4_1 = Block(comm, device, 512, 3)
-            self.block4_2 = Block(comm, device, 512, 3)
-            self.block4_3 = Block(comm, device, 512, 3)
-            self.block5_1 = Block(comm, device, 512, 3)
-            self.block5_2 = Block(comm, device, 512, 3)
-            self.block5_3 = Block(comm, device, 512, 3)
+            self.block1_1 = Block(comm, 64, 3)
+            self.block1_2 = Block(comm, 64, 3)
+            self.block2_1 = Block(comm, 128, 3)
+            self.block2_2 = Block(comm, 128, 3)
+            self.block3_1 = Block(comm, 256, 3)
+            self.block3_2 = Block(comm, 256, 3)
+            self.block3_3 = Block(comm, 256, 3)
+            self.block4_1 = Block(comm, 512, 3)
+            self.block4_2 = Block(comm, 512, 3)
+            self.block4_3 = Block(comm, 512, 3)
+            self.block5_1 = Block(comm, 512, 3)
+            self.block5_2 = Block(comm, 512, 3)
+            self.block5_3 = Block(comm, 512, 3)
             self.fc1 = L.Linear(None, 512, nobias=True)
             self.bn_fc1 = L.BatchNormalization(512)
             self.fc2 = L.Linear(None, class_labels, nobias=True)
