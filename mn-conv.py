@@ -14,15 +14,6 @@ import chainermn
 import VGG
 
 
-def _convert_dataset_to_float32(dataset):
-    """Convert labels in dataset to float32.
-
-    MultiNodeIterator only supports float32 though labels of CIFAR10 is int32,
-    thus we need to convert data types.
-    """
-    return [(d[0], d[1].astype(np.float32)) for d in dataset]
-
-
 def main():
     parser = argparse.ArgumentParser(description='Chainer example: MNIST')
     parser.add_argument('--batchsize', '-b', type=int, default=100,
@@ -57,11 +48,7 @@ def main():
     # Set up a neural network to train
     # Classifier reports softmax cross entropy loss and accuracy at every
     # iteration, which will be used by the PrintReport extension below.
-    model = L.Classifier(
-        predictor=VGG.VGG(comm, 10),
-        lossfun=lambda x, t: F.softmax_cross_entropy(x, t.astype(np.int32)),
-        accfun=lambda y, t: F.evaluation.accuracy.accuracy(y, t.astype(np.int32)))
-#    model = L.Classifier(VGG.VGG(comm, 10))
+    model = L.Classifier(VGG.VGG(comm, 10))
 
     if args.gpu:
         # Make a specified GPU current
@@ -75,10 +62,7 @@ def main():
 
     # Load the CIFAR10 dataset
     train, test = chainer.datasets.get_cifar10()
-    if comm.rank == 0:
-        train = _convert_dataset_to_float32(train)
-        test = _convert_dataset_to_float32(test)
-    else:
+    if comm.rank != 0:
         train = chainermn.datasets.create_empty_dataset(train)
         test = chainermn.datasets.create_empty_dataset(test)
 
