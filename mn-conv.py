@@ -32,11 +32,6 @@ def main():
                         help='Disable PlotReport extension')
     args = parser.parse_args()
 
-    print('GPU: {}'.format(args.gpu))
-    print('# Minibatch-size: {}'.format(args.batchsize))
-    print('# epoch: {}'.format(args.epoch))
-    print('')
-
     # Create ChainerMN communicator.
     if args.gpu:
         comm = chainermn.create_communicator('hierarchical')
@@ -44,6 +39,12 @@ def main():
     else:
         comm = chainermn.create_communicator('naive')
         device = -1
+
+    if comm.rank == 0:
+        print('GPU: {}'.format(args.gpu))
+        print('# Minibatch-size: {}'.format(args.batchsize))
+        print('# epoch: {}'.format(args.epoch))
+        print('')
 
     # Set up a neural network to train
     # Classifier reports softmax cross entropy loss and accuracy at every
