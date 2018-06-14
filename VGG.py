@@ -69,7 +69,10 @@ class Block(chainer.Chain):
     def __init__(self, comm, in_channels, out_channels, ksize, pad=1):
         super(Block, self).__init__()
         with self.init_scope():
-            self.conv = ParallelConvolution2D(comm, in_channels, out_channels, ksize, pad=pad, nobias=True)
+            if comm.size <= in_channels:
+                self.conv = ParallelConvolution2D(comm, in_channels, out_channels, ksize, pad=pad, nobias=True)
+            else:
+                self.conv = chainer.links.Convolution2D(in_channels, out_channels, ksize, pad=pad, nobias=True)
             self.bn = L.BatchNormalization(out_channels)
 
     def __call__(self, x):
